@@ -92,9 +92,13 @@ install_package() {
       ;;
     pipx)
       ensure_installer pipx
-      if ! pipx list 2>/dev/null | grep -q "$package"; then
-        echo "  [pipx] Installiere: $package"
-        pipx install "$package"
+      # Pruefen ob in /usr/local/bin oder via pipx list vorhanden
+      if [[ -x "/usr/local/bin/$path" ]] || PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx list 2>/dev/null | grep -q "$package"; then
+        echo "  [OK] $package bereits installiert"
+      else
+        echo "  [pipx] Installiere: $package (global nach /usr/local/bin)"
+        # PIPX_HOME und PIPX_BIN_DIR fuer systemweite Installation setzen
+        sudo PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install "$package"
       fi
       ;;
     npm)
