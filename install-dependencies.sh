@@ -114,19 +114,29 @@ install_package() {
 SECTIONS="shellExecutables pythonExecutables nodeExecutables"
 
 for cfg in "${CONFIG_FILES[@]}"; do
+  echo "Verarbeite: $cfg"
   for section in $SECTIONS; do
-    jq -r --arg sec "$section" '
-      (.[$sec]? // {}) | to_entries[] |
-      [.value.installer // "apt", .value.packageDeb // .value.package, .value.path] | @tsv
-    ' "$cfg" | while IFS=$'\t' read -r installer package path; do
+    # Pruefen ob Sektion existiert und Eintraege hat
+    count=$(jq -r --arg sec "$section" '(.[$sec]? // {}) | length' "$cfg")
+    if [[ "$count" -gt 0 ]]; then
+      echo "  Sektion: $section ($count Eintraege)"
+    fi
+    
+    # Process substitution statt Pipe um SEEN_PKG zu erhalten
+    while IFS=$'\t' read -r installer package path; do
       [[ -z "$package" ]] && continue
       # Mehrere Pakete (Space-getrennt) unterstuetzen
       for pkg in $package; do
-        [[ -n "${SEEN_PKG[$pkg]:-}" ]] && continue
+        if [[ -n "${SEEN_PKG[$pkg]:-}" ]]; then
+          continue
+        fi
         SEEN_PKG["$pkg"]=1
         install_package "$installer" "$pkg" "$path"
       done
-    done
+    done < <(jq -r --arg sec "$section" '
+      (.[$sec]? // {}) | to_entries[] |
+      [.value.installer // "apt", .value.packageDeb // .value.package, .value.path] | @tsv
+    ' "$cfg")
   done
 done
 
