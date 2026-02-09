@@ -86,8 +86,8 @@ install_package() {
     pip|pip3)
       ensure_installer pip
       if ! pip3 show "$package" &>/dev/null; then
-        echo "  [pip] Installiere: $package"
-        pip3 install --user "$package" || sudo pip3 install "$package"
+        echo "  [pip] Installiere: $package (systemweit)"
+        sudo pip3 install "$package" --break-system-packages 2>/dev/null || sudo pip3 install "$package"
       fi
       ;;
     pipx)
