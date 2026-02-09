@@ -87,7 +87,12 @@ install_package() {
       ensure_installer pip
       if ! pip3 show "$package" &>/dev/null; then
         echo "  [pip] Installiere: $package (systemweit)"
-        sudo pip3 install "$package" --break-system-packages 2>/dev/null || sudo pip3 install "$package"
+        # --break-system-packages fuer neuere pip (23.0+), sonst ohne
+        if pip3 install --help 2>&1 | grep -q "break-system-packages"; then
+          sudo pip3 install "$package" --break-system-packages
+        else
+          sudo pip3 install "$package"
+        fi
       fi
       ;;
     pipx)
