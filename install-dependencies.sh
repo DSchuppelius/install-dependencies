@@ -70,10 +70,13 @@ install_package() {
   local package="$2"
   local path="$3"
 
-  # Pruefen ob bereits installiert (via path)
-  if [[ -n "$path" ]] && command -v "$path" &>/dev/null; then
-    echo "  [OK] $package bereits installiert ($path)"
-    return 0
+  # Fuer pipx: Nur /usr/local/bin pruefen, nicht allgemein im PATH
+  # (lokale ~/.local/bin Installation reicht nicht fuer Server-Dienste)
+  if [[ "$installer" != "pipx" ]]; then
+    if [[ -n "$path" ]] && command -v "$path" &>/dev/null; then
+      echo "  [OK] $package bereits installiert ($path)"
+      return 0
+    fi
   fi
 
   case "$installer" in
