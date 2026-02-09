@@ -114,6 +114,20 @@ install_package() {
   esac
 }
 
+# Hilfsfunktion: Dependencies in pipx venv injizieren
+inject_pipx_dependencies() {
+  local package="$1"
+  shift
+  local deps=("$@")
+  
+  for dep in "${deps[@]}"; do
+    [[ -z "$dep" ]] && continue
+    echo "  [pipx inject] $dep -> $package"
+    sudo PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx inject "$package" "$dep" 2>/dev/null || \
+      echo "    (Warnung: inject fehlgeschlagen fuer $dep)"
+  done
+}
+
 # Alle Executable-Sektionen durchgehen
 SECTIONS="shellExecutables pythonExecutables nodeExecutables"
 
@@ -140,6 +154,32 @@ for cfg in "${CONFIG_FILES[@]}"; do
     done < <(jq -r --arg sec "$section" '
       (.[$sec]? // {}) | to_entries[] |
       [.value.installer // "apt", .value.packageDeb // .value.package, .value.path] | @tsv
+    ' "$cfg")
+  done
+done
+
+###############################################################################
+# 3b - Dependencies verarbeiten (pipx inject etc.)
+###############################################################################
+echo "Verarbeite Dependencies (pipx inject)..."
+for cfg in "${CONFIG_FILES[@]}"; do
+  for section in $SECTIONS; do
+    # Pakete mit dependencies finden
+    while IFS=$'\t' read -r installer package deps_json; do
+      [[ -z "$package" || -z "$deps_json" || "$deps_json" == "null" ]] && continue
+      
+      # Nur fuer pipx-Pakete relevant
+      if [[ "$installer" == "pipx" ]]; then
+        # JSON-Array in Bash-Array umwandeln
+        mapfile -t deps < <(echo "$deps_json" | jq -r '.[]')
+        if [[ ${#deps[@]} -gt 0 ]]; then
+          inject_pipx_dependencies "$package" "${deps[@]}"
+        fi
+      fi
+    done < <(jq -r --arg sec "$section" '
+      (.[$sec]? // {}) | to_entries[] |
+      select(.value.dependencies?) |
+      [.value.installer // "apt", .value.package, (.value.dependencies | tojson)] | @tsv
     ' "$cfg")
   done
 done
