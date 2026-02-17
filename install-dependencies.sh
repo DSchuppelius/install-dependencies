@@ -212,7 +212,7 @@ for cfg in "${CONFIG_FILES[@]}"; do
 done
 
 ###############################################################################
-# 5 - weitere install-dependencies.sh in vendor/ ausfuehren
+# 5 - executables.json in vendor/ Paketen verarbeiten
 ###############################################################################
 # 5.1  Projekt-Root ermitteln - steige solange nach oben, bis ein vendor/-Ordner
 #      gefunden wird oder / erreicht ist.
@@ -223,17 +223,56 @@ done
 
 VENDOR_DIR="$ROOT/vendor"
 if [[ -d "$VENDOR_DIR" ]]; then
-  echo "Suche in $VENDOR_DIR nach weiteren install-dependencies-Skripten ..."
-  while IFS= read -r other_script; do
-    # Eigene Datei ueberspringen
-    if [[ "$(realpath "$other_script")" != "$(realpath "$SCRIPT_DIR/install-dependencies.sh")" ]]; then
-      echo "--------------------------------------------------------------"
-      echo "Starte abhaengiges Skript: $other_script"
-      env -u INSTALL_DEPS_RUNNING bash "$other_script"
-      echo "Fertig: $other_script"
-      echo "--------------------------------------------------------------"
-    fi
-  done < <(find "$VENDOR_DIR" -maxdepth 5 -type f -name 'install-dependencies.sh')
+  echo "Suche in $VENDOR_DIR nach weiteren executables.json Konfigurationen ..."
+  mapfile -t VENDOR_CONFIGS < <(find "$VENDOR_DIR" -maxdepth 5 -path '*/config/*executables.json' -type f | sort)
+  
+  if ((${#VENDOR_CONFIGS[@]}>0)); then
+    echo "Gefundene Vendor-Konfig-Dateien:"
+    printf '  * %s\n' "${VENDOR_CONFIGS[@]}"
+    
+    # Pakete aus Vendor-Configs installieren (gleiche Logik wie Sektion 3)
+    for cfg in "${VENDOR_CONFIGS[@]}"; do
+      echo "Verarbeite Vendor-Config: $cfg"
+      for section in $SECTIONS; do
+        count=$(jq -r --arg sec "$section" '(.[$sec]? // {}) | length' "$cfg")
+        if [[ "$count" -gt 0 ]]; then
+          echo "  Sektion: $section ($count Eintraege)"
+        fi
+        
+        while IFS=$'\t' read -r installer package path; do
+          [[ -z "$package" ]] && continue
+          for pkg in $package; do
+            if [[ -n "${SEEN_PKG[$pkg]:-}" ]]; then
+              continue
+            fi
+            SEEN_PKG["$pkg"]=1
+            install_package "$installer" "$pkg" "$path"
+          done
+        done < <(jq -r --arg sec "$section" '
+          (.[$sec]? // {}) | to_entries[] |
+          [.value.installer // "apt", .value.packageDeb // .value.package, .value.path] | @tsv
+        ' "$cfg")
+      done
+    done
+    
+    # Java-Executables aus Vendor-Configs (gleiche Logik wie Sektion 4)
+    for cfg in "${VENDOR_CONFIGS[@]}"; do
+      jq -r '.javaExecutables? // {} | to_entries[] | select(.value.url? and .value.path?) | [.value.url, .value.path] | @tsv
+      ' "$cfg" | while IFS=$'\t' read -r url target; do
+        [[ -n "${SEEN_JAR[$target]:-}" ]] && continue
+        SEEN_JAR["$target"]=1
+        if [[ ! -f "$target" ]]; then
+          echo "Lade $url -> $target ..."
+          sudo curl -L -o "$target" "$url"
+          sudo chmod +x "$target"
+        else
+          echo "$target bereits vorhanden"
+        fi
+      done
+    done
+  else
+    echo "Keine executables.json in $VENDOR_DIR gefunden."
+  fi
 fi
 
 echo "Alle definierten Abhaengigkeiten wurden geprueft und installiert."
