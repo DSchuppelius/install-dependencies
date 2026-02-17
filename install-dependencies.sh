@@ -36,6 +36,10 @@ printf '  * %s\n' "${CONFIG_FILES[@]}"
 # 3 - Pakete installieren (apt, pip, pipx, npm, etc.)
 ###############################################################################
 declare -A SEEN_PKG
+
+# Noninteractive mode um Dialoge (z.B. Dienst-Neustarts) zu unterdrücken
+export DEBIAN_FRONTEND=noninteractive
+
 sudo apt-get update            # einmal zu Beginn
 
 # Hilfsfunktion: Installer sicherstellen
@@ -45,20 +49,20 @@ ensure_installer() {
     pipx)
       if ! command -v pipx &>/dev/null; then
         echo "pipx nicht gefunden - installiere pipx..."
-        sudo apt-get install -y pipx || sudo pip3 install pipx
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y pipx || sudo pip3 install pipx
         pipx ensurepath 2>/dev/null || true
       fi
       ;;
     pip|pip3)
       if ! command -v pip3 &>/dev/null; then
         echo "pip3 nicht gefunden - installiere python3-pip..."
-        sudo apt-get install -y python3-pip
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pip
       fi
       ;;
     npm)
       if ! command -v npm &>/dev/null; then
         echo "npm nicht gefunden - installiere nodejs npm..."
-        sudo apt-get install -y nodejs npm
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs npm
       fi
       ;;
   esac
@@ -83,7 +87,7 @@ install_package() {
     apt|apt-get|"")
       if ! dpkg -s "$package" &>/dev/null; then
         echo "  [apt] Installiere: $package"
-        sudo apt-get install -y "$package" || echo "!!! $package nicht verfuegbar !!!"
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$package" || echo "!!! $package nicht verfuegbar !!!"
       fi
       ;;
     pip|pip3)
