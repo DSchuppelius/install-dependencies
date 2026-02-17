@@ -229,7 +229,7 @@ if [[ -d "$VENDOR_DIR" ]]; then
     if [[ "$(realpath "$other_script")" != "$(realpath "$SCRIPT_DIR/install-dependencies.sh")" ]]; then
       echo "--------------------------------------------------------------"
       echo "Starte abhaengiges Skript: $other_script"
-      bash "$other_script"
+      env -u INSTALL_DEPS_RUNNING bash "$other_script"
       echo "Fertig: $other_script"
       echo "--------------------------------------------------------------"
     fi
