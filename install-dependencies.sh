@@ -179,7 +179,7 @@ for cfg in "${CONFIG_FILES[@]}"; do
       done
     done < <(jq -r --arg sec "$section" --argjson all "$INSTALL_ALL" '
       (.[$sec]? // {}) | to_entries[] |
-      select(\$all == 1 or .value.required != false) |
+      select($all == 1 or .value.required != false) |
       [.value.installer // "apt", .value.packageDeb // .value.package, .value.path] | @tsv
     ' "$cfg")
   done
@@ -206,7 +206,7 @@ for cfg in "${CONFIG_FILES[@]}"; do
     done < <(jq -r --arg sec "$section" --argjson all "$INSTALL_ALL" '
       (.[$sec]? // {}) | to_entries[] |
       select(.value.dependencies?) |
-      select(\$all == 1 or .value.required != false) |
+      select($all == 1 or .value.required != false) |
       [.value.installer // "apt", .value.package, (.value.dependencies | tojson)] | @tsv
     ' "$cfg")
   done
@@ -270,7 +270,7 @@ if [[ -d "$VENDOR_DIR" ]]; then
           done
         done < <(jq -r --arg sec "$section" --argjson all "$INSTALL_ALL" '
           (.[$sec]? // {}) | to_entries[] |
-          select(\$all == 1 or .value.required != false) |
+          select($all == 1 or .value.required != false) |
           [.value.installer // "apt", .value.packageDeb // .value.package, .value.path] | @tsv
         ' "$cfg")
       done
