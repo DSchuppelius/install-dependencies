@@ -6,12 +6,26 @@
 set -euo pipefail
 
 ###############################################################################
-# 0 - Rekursions-Schutz
+# 0 - Rekursions-Schutz & Parameter
 ###############################################################################
 if [[ -n "${INSTALL_DEPS_RUNNING:-}" ]]; then
   exit 0
 fi
 export INSTALL_DEPS_RUNNING=1
+
+# --all: Auch optionale Pakete (required=false) installieren
+INSTALL_ALL=0
+for arg in "$@"; do
+  case "$arg" in
+    --all) INSTALL_ALL=1 ;;
+  esac
+done
+
+if [[ "$INSTALL_ALL" -eq 1 ]]; then
+  echo "Modus: ALLE Pakete (inkl. optionaler)"
+else
+  echo "Modus: Nur erforderliche Pakete (--all fuer optionale)"
+fi
 
 ###############################################################################
 # 1 - Verzeichnisse & Werkzeuge
@@ -163,8 +177,9 @@ for cfg in "${CONFIG_FILES[@]}"; do
         SEEN_PKG["$pkg"]=1
         install_package "$installer" "$pkg" "$path"
       done
-    done < <(jq -r --arg sec "$section" '
+    done < <(jq -r --arg sec "$section" --argjson all "$INSTALL_ALL" '
       (.[$sec]? // {}) | to_entries[] |
+      select($all == 1 or (.value.required? // true) == true) |
       [.value.installer // "apt", .value.packageDeb // .value.package, .value.path] | @tsv
     ' "$cfg")
   done
@@ -188,9 +203,10 @@ for cfg in "${CONFIG_FILES[@]}"; do
           inject_pipx_dependencies "$package" "${deps[@]}"
         fi
       fi
-    done < <(jq -r --arg sec "$section" '
+    done < <(jq -r --arg sec "$section" --argjson all "$INSTALL_ALL" '
       (.[$sec]? // {}) | to_entries[] |
       select(.value.dependencies?) |
+      select($all == 1 or (.value.required? // true) == true) |
       [.value.installer // "apt", .value.package, (.value.dependencies | tojson)] | @tsv
     ' "$cfg")
   done
@@ -201,7 +217,7 @@ done
 ###############################################################################
 declare -A SEEN_JAR
 for cfg in "${CONFIG_FILES[@]}"; do
-  jq -r '.javaExecutables? // {} | to_entries[] | select(.value.url? and .value.path?) | [.value.url, .value.path] | @tsv
+  jq -r --argjson all "$INSTALL_ALL" '.javaExecutables? // {} | to_entries[] | select(.value.url? and .value.path?) | select($all == 1 or (.value.required? // true) == true) | [.value.url, .value.path] | @tsv
   ' "$cfg" | while IFS=$'\t' read -r url target; do
     [[ -n "${SEEN_JAR[$target]:-}" ]] && continue
     SEEN_JAR["$target"]=1
@@ -252,8 +268,9 @@ if [[ -d "$VENDOR_DIR" ]]; then
             SEEN_PKG["$pkg"]=1
             install_package "$installer" "$pkg" "$path"
           done
-        done < <(jq -r --arg sec "$section" '
+        done < <(jq -r --arg sec "$section" --argjson all "$INSTALL_ALL" '
           (.[$sec]? // {}) | to_entries[] |
+          select($all == 1 or (.value.required? // true) == true) |
           [.value.installer // "apt", .value.packageDeb // .value.package, .value.path] | @tsv
         ' "$cfg")
       done
@@ -261,7 +278,7 @@ if [[ -d "$VENDOR_DIR" ]]; then
     
     # Java-Executables aus Vendor-Configs (gleiche Logik wie Sektion 4)
     for cfg in "${VENDOR_CONFIGS[@]}"; do
-      jq -r '.javaExecutables? // {} | to_entries[] | select(.value.url? and .value.path?) | [.value.url, .value.path] | @tsv
+      jq -r --argjson all "$INSTALL_ALL" '.javaExecutables? // {} | to_entries[] | select(.value.url? and .value.path?) | select($all == 1 or (.value.required? // true) == true) | [.value.url, .value.path] | @tsv
       ' "$cfg" | while IFS=$'\t' read -r url target; do
         [[ -n "${SEEN_JAR[$target]:-}" ]] && continue
         SEEN_JAR["$target"]=1
