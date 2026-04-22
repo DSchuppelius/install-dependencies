@@ -230,6 +230,7 @@ is_valid_jar() {
 }
 
 declare -A SEEN_JAR
+DOWNLOAD_WARNINGS=0
 for cfg in "${CONFIG_FILES[@]}"; do
   while IFS=$'\t' read -r url target; do
     [[ -n "${SEEN_JAR[$target]:-}" ]] && continue
@@ -243,11 +244,19 @@ for cfg in "${CONFIG_FILES[@]}"; do
       else
         echo "Lade $url -> $target ..."
       fi
-      sudo curl -fL -o "$target" "$url" || { echo "!!! Download fehlgeschlagen: $url"; sudo rm -f "$target"; exit 1; }
+      sudo curl -fL -o "$target" "$url" || {
+        echo "!!! Download fehlgeschlagen: $url"
+        echo "!!! WARNUNG: Deployment wird fortgesetzt. Datei bitte manuell bereitstellen: $target"
+        sudo rm -f "$target"
+        DOWNLOAD_WARNINGS=1
+        continue
+      }
       if ! is_valid_jar "$target"; then
         echo "!!! Heruntergeladene Datei ist keine gueltige JAR: $target"
+        echo "!!! WARNUNG: Deployment wird fortgesetzt. Datei bitte manuell bereitstellen: $target"
         sudo rm -f "$target"
-        exit 1
+        DOWNLOAD_WARNINGS=1
+        continue
       fi
       sudo chmod +x "$target"
       echo "$target heruntergeladen und validiert ✓"
@@ -314,11 +323,19 @@ if [[ -d "$VENDOR_DIR" ]]; then
           else
             echo "Lade $url -> $target ..."
           fi
-          sudo curl -fL -o "$target" "$url" || { echo "!!! Download fehlgeschlagen: $url"; sudo rm -f "$target"; exit 1; }
+          sudo curl -fL -o "$target" "$url" || {
+            echo "!!! Download fehlgeschlagen: $url"
+            echo "!!! WARNUNG: Deployment wird fortgesetzt. Datei bitte manuell bereitstellen: $target"
+            sudo rm -f "$target"
+            DOWNLOAD_WARNINGS=1
+            continue
+          }
           if ! is_valid_jar "$target"; then
             echo "!!! Heruntergeladene Datei ist keine gueltige JAR: $target"
+            echo "!!! WARNUNG: Deployment wird fortgesetzt. Datei bitte manuell bereitstellen: $target"
             sudo rm -f "$target"
-            exit 1
+            DOWNLOAD_WARNINGS=1
+            continue
           fi
           sudo chmod +x "$target"
           echo "$target heruntergeladen und validiert ✓"
@@ -330,4 +347,9 @@ if [[ -d "$VENDOR_DIR" ]]; then
   fi
 fi
 
-echo "Alle definierten Abhaengigkeiten wurden geprueft und installiert."
+if [[ "$DOWNLOAD_WARNINGS" -eq 1 ]]; then
+  echo "Alle definierten Abhaengigkeiten wurden geprueft."
+  echo "WARNUNG: Mindestens ein Java-Download ist fehlgeschlagen. Bitte betroffene Datei(en) manuell bereitstellen."
+else
+  echo "Alle definierten Abhaengigkeiten wurden geprueft und installiert."
+fi
