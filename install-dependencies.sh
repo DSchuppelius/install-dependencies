@@ -215,20 +215,44 @@ done
 ###############################################################################
 # 4 - Java-Executables herunterladen
 ###############################################################################
+# Prueft ob eine JAR-Datei gueltig ist (Mindestgroesse + ZIP-Magic-Bytes)
+is_valid_jar() {
+  local file="$1"
+  [[ ! -f "$file" ]] && return 1
+  local size
+  size=$(stat -c%s "$file" 2>/dev/null || echo 0)
+  [[ "$size" -lt 10240 ]] && return 1           # kleiner als 10 KB = sicher kaputt
+  # ZIP/JAR beginnt mit Magic Bytes PK (0x504B)
+  local magic
+  magic=$(xxd -l 2 -p "$file" 2>/dev/null || hexdump -n 2 -e '"%02x"' "$file" 2>/dev/null || echo "")
+  [[ "$magic" == "504b" ]] && return 0
+  return 1
+}
+
 declare -A SEEN_JAR
 for cfg in "${CONFIG_FILES[@]}"; do
-  jq -r --argjson all "$INSTALL_ALL" '.javaExecutables? // {} | to_entries[] | select(.value.url? and .value.path?) | select($all == 1 or .value.required != false) | [.value.url, .value.path] | @tsv
-  ' "$cfg" | while IFS=$'\t' read -r url target; do
+  while IFS=$'\t' read -r url target; do
     [[ -n "${SEEN_JAR[$target]:-}" ]] && continue
     SEEN_JAR["$target"]=1
-    if [[ ! -f "$target" ]]; then
-      echo "Lade $url -> $target ..."
-      sudo curl -L -o "$target" "$url"
-      sudo chmod +x "$target"
+    if is_valid_jar "$target"; then
+      echo "$target bereits vorhanden und gueltig"
     else
-      echo "$target bereits vorhanden"
+      if [[ -f "$target" ]]; then
+        echo "!!! $target existiert aber ist ungueltig (kaputt/leer) - lade neu ..."
+        sudo rm -f "$target"
+      else
+        echo "Lade $url -> $target ..."
+      fi
+      sudo curl -fL -o "$target" "$url" || { echo "!!! Download fehlgeschlagen: $url"; sudo rm -f "$target"; exit 1; }
+      if ! is_valid_jar "$target"; then
+        echo "!!! Heruntergeladene Datei ist keine gueltige JAR: $target"
+        sudo rm -f "$target"
+        exit 1
+      fi
+      sudo chmod +x "$target"
+      echo "$target heruntergeladen und validiert ✓"
     fi
-  done
+  done < <(jq -r --argjson all "$INSTALL_ALL" '.javaExecutables? // {} | to_entries[] | select(.value.url? and .value.path?) | select($all == 1 or .value.required != false) | [.value.url, .value.path] | @tsv' "$cfg")
 done
 
 ###############################################################################
@@ -278,18 +302,28 @@ if [[ -d "$VENDOR_DIR" ]]; then
     
     # Java-Executables aus Vendor-Configs (gleiche Logik wie Sektion 4)
     for cfg in "${VENDOR_CONFIGS[@]}"; do
-      jq -r --argjson all "$INSTALL_ALL" '.javaExecutables? // {} | to_entries[] | select(.value.url? and .value.path?) | select($all == 1 or .value.required != false) | [.value.url, .value.path] | @tsv
-      ' "$cfg" | while IFS=$'\t' read -r url target; do
+      while IFS=$'\t' read -r url target; do
         [[ -n "${SEEN_JAR[$target]:-}" ]] && continue
         SEEN_JAR["$target"]=1
-        if [[ ! -f "$target" ]]; then
-          echo "Lade $url -> $target ..."
-          sudo curl -L -o "$target" "$url"
-          sudo chmod +x "$target"
+        if is_valid_jar "$target"; then
+          echo "$target bereits vorhanden und gueltig"
         else
-          echo "$target bereits vorhanden"
+          if [[ -f "$target" ]]; then
+            echo "!!! $target existiert aber ist ungueltig (kaputt/leer) - lade neu ..."
+            sudo rm -f "$target"
+          else
+            echo "Lade $url -> $target ..."
+          fi
+          sudo curl -fL -o "$target" "$url" || { echo "!!! Download fehlgeschlagen: $url"; sudo rm -f "$target"; exit 1; }
+          if ! is_valid_jar "$target"; then
+            echo "!!! Heruntergeladene Datei ist keine gueltige JAR: $target"
+            sudo rm -f "$target"
+            exit 1
+          fi
+          sudo chmod +x "$target"
+          echo "$target heruntergeladen und validiert ✓"
         fi
-      done
+      done < <(jq -r --argjson all "$INSTALL_ALL" '.javaExecutables? // {} | to_entries[] | select(.value.url? and .value.path?) | select($all == 1 or .value.required != false) | [.value.url, .value.path] | @tsv' "$cfg")
     done
   else
     echo "Keine executables.json in $VENDOR_DIR gefunden."
