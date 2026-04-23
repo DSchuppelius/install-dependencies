@@ -54,7 +54,33 @@ declare -A SEEN_PKG
 # Noninteractive mode um Dialoge (z.B. Dienst-Neustarts) zu unterdrücken
 export DEBIAN_FRONTEND=noninteractive
 
-sudo apt-get update            # einmal zu Beginn
+# apt update kann wegen einzelner Fremd-Repositories fehlschlagen.
+# In dem Fall Deployment nicht abbrechen, sondern mit vorhandenen Listen fortfahren.
+safe_apt_update() {
+  local apt_output
+  if apt_output=$(sudo apt-get update 2>&1); then
+    echo "$apt_output"
+    return 0
+  fi
+
+  echo "$apt_output"
+
+  echo ""
+  echo "WARNUNG: 'apt-get update' fehlgeschlagen."
+  echo "Fahre mit vorhandenen Paketlisten fort (einzelne apt-Installationen koennen fehlschlagen)."
+  echo "Hinweis: Mindestens ein APT-Repository ist fehlerhaft oder nicht erreichbar."
+
+  # Moeglichst hilfreiche, aber allgemeine Diagnose der betroffenen Repositories.
+  local broken_sources
+  broken_sources=$(echo "$apt_output" | awk '/^(Err:|Fehl:)/ {print $2}' | sort -u | tr '\n' ' ')
+  if [[ -n "$broken_sources" ]]; then
+    echo "Betroffene Quelle(n): $broken_sources"
+  fi
+
+  return 0
+}
+
+safe_apt_update            # einmal zu Beginn
 
 # Hilfsfunktion: Installer sicherstellen
 ensure_installer() {
