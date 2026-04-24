@@ -34,6 +34,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_DIR="${CONFIG_DIR:-$SCRIPT_DIR/../config}"      # override moeglich
 JQ=$(command -v jq) || { echo "jq noetig - sudo apt install jq"; exit 1; }
 
+# pip-Feature einmalig pruefen (Performance bei vielen Pip-Paketen)
+PIP_BREAK_SYSTEM_PACKAGES=""
+
 ###############################################################################
 # 2 - Alle *executables.json einsammeln
 ###############################################################################
@@ -135,7 +138,7 @@ install_package() {
       if ! pip3 show "$package" &>/dev/null; then
         echo "  [pip] Installiere: $package (systemweit)"
         # --break-system-packages fuer neuere pip (23.0+), sonst ohne
-        if pip3 install --help 2>&1 | grep -q "break-system-packages"; then
+        if pip_supports_break_system_packages; then
           sudo pip3 install "$package" --break-system-packages
         else
           sudo pip3 install "$package"
@@ -180,63 +183,124 @@ inject_pipx_dependencies() {
   done
 }
 
+pip_supports_break_system_packages() {
+  if [[ -z "$PIP_BREAK_SYSTEM_PACKAGES" ]]; then
+    if pip3 install --help 2>&1 | grep -q "break-system-packages"; then
+      PIP_BREAK_SYSTEM_PACKAGES="yes"
+    else
+      PIP_BREAK_SYSTEM_PACKAGES="no"
+    fi
+  fi
+
+  [[ "$PIP_BREAK_SYSTEM_PACKAGES" == "yes" ]]
+}
+
+process_package_configs() {
+  local message_prefix="$1"
+  shift
+
+  local cfg section count installer package path pkg
+  for cfg in "$@"; do
+    echo "$message_prefix: $cfg"
+    for section in $SECTIONS; do
+      # Pruefen ob Sektion existiert und Eintraege hat
+      count=$($JQ -r --arg sec "$section" '(.[$sec]? // {}) | length' "$cfg")
+      if [[ "$count" -gt 0 ]]; then
+        echo "  Sektion: $section ($count Eintraege)"
+      fi
+
+      # Process substitution statt Pipe um SEEN_PKG zu erhalten
+      while IFS=$'\t' read -r installer package path; do
+        [[ -z "$package" ]] && continue
+        # Mehrere Pakete (Space-getrennt) unterstuetzen
+        for pkg in $package; do
+          if [[ -n "${SEEN_PKG[$pkg]:-}" ]]; then
+            continue
+          fi
+          SEEN_PKG["$pkg"]=1
+          install_package "$installer" "$pkg" "$path"
+        done
+      done < <($JQ -r --arg sec "$section" --argjson all "$INSTALL_ALL" '
+        (.[$sec]? // {}) | to_entries[] |
+        select($all == 1 or .value.required != false) |
+        [.value.installer // "apt", .value.packageDeb // .value.package, .value.path] | @tsv
+      ' "$cfg")
+    done
+  done
+}
+
+process_dependency_configs() {
+  local cfg section installer package deps_json
+  for cfg in "$@"; do
+    for section in $SECTIONS; do
+      # Pakete mit dependencies finden
+      while IFS=$'\t' read -r installer package deps_json; do
+        [[ -z "$package" || -z "$deps_json" || "$deps_json" == "null" ]] && continue
+
+        # Nur fuer pipx-Pakete relevant
+        if [[ "$installer" == "pipx" ]]; then
+          # JSON-Array in Bash-Array umwandeln
+          mapfile -t deps < <(echo "$deps_json" | $JQ -r '.[]')
+          if [[ ${#deps[@]} -gt 0 ]]; then
+            inject_pipx_dependencies "$package" "${deps[@]}"
+          fi
+        fi
+      done < <($JQ -r --arg sec "$section" --argjson all "$INSTALL_ALL" '
+        (.[$sec]? // {}) | to_entries[] |
+        select(.value.dependencies?) |
+        select($all == 1 or .value.required != false) |
+        [.value.installer // "apt", .value.package, (.value.dependencies | tojson)] | @tsv
+      ' "$cfg")
+    done
+  done
+}
+
+process_java_configs() {
+  local cfg url target
+  for cfg in "$@"; do
+    while IFS=$'\t' read -r url target; do
+      [[ -n "${SEEN_JAR[$target]:-}" ]] && continue
+      SEEN_JAR["$target"]=1
+      if is_valid_jar "$target"; then
+        echo "$target bereits vorhanden und gueltig"
+      else
+        if [[ -f "$target" ]]; then
+          echo "!!! $target existiert aber ist ungueltig (kaputt/leer) - lade neu ..."
+          sudo rm -f "$target"
+        else
+          echo "Lade $url -> $target ..."
+        fi
+        sudo curl -fL -o "$target" "$url" || {
+          echo "!!! Download fehlgeschlagen: $url"
+          echo "!!! WARNUNG: Deployment wird fortgesetzt. Datei bitte manuell bereitstellen: $target"
+          sudo rm -f "$target"
+          DOWNLOAD_WARNINGS=1
+          continue
+        }
+        if ! is_valid_jar "$target"; then
+          echo "!!! Heruntergeladene Datei ist keine gueltige JAR: $target"
+          echo "!!! WARNUNG: Deployment wird fortgesetzt. Datei bitte manuell bereitstellen: $target"
+          sudo rm -f "$target"
+          DOWNLOAD_WARNINGS=1
+          continue
+        fi
+        sudo chmod +x "$target"
+        echo "$target heruntergeladen und validiert ✓"
+      fi
+    done < <($JQ -r --argjson all "$INSTALL_ALL" '.javaExecutables? // {} | to_entries[] | select(.value.url? and .value.path?) | select($all == 1 or .value.required != false) | [.value.url, .value.path] | @tsv' "$cfg")
+  done
+}
+
 # Alle Executable-Sektionen durchgehen
 SECTIONS="shellExecutables pythonExecutables nodeExecutables"
 
-for cfg in "${CONFIG_FILES[@]}"; do
-  echo "Verarbeite: $cfg"
-  for section in $SECTIONS; do
-    # Pruefen ob Sektion existiert und Eintraege hat
-    count=$(jq -r --arg sec "$section" '(.[$sec]? // {}) | length' "$cfg")
-    if [[ "$count" -gt 0 ]]; then
-      echo "  Sektion: $section ($count Eintraege)"
-    fi
-    
-    # Process substitution statt Pipe um SEEN_PKG zu erhalten
-    while IFS=$'\t' read -r installer package path; do
-      [[ -z "$package" ]] && continue
-      # Mehrere Pakete (Space-getrennt) unterstuetzen
-      for pkg in $package; do
-        if [[ -n "${SEEN_PKG[$pkg]:-}" ]]; then
-          continue
-        fi
-        SEEN_PKG["$pkg"]=1
-        install_package "$installer" "$pkg" "$path"
-      done
-    done < <(jq -r --arg sec "$section" --argjson all "$INSTALL_ALL" '
-      (.[$sec]? // {}) | to_entries[] |
-      select($all == 1 or .value.required != false) |
-      [.value.installer // "apt", .value.packageDeb // .value.package, .value.path] | @tsv
-    ' "$cfg")
-  done
-done
+process_package_configs "Verarbeite" "${CONFIG_FILES[@]}"
 
 ###############################################################################
 # 3b - Dependencies verarbeiten (pipx inject etc.)
 ###############################################################################
 echo "Verarbeite Dependencies (pipx inject)..."
-for cfg in "${CONFIG_FILES[@]}"; do
-  for section in $SECTIONS; do
-    # Pakete mit dependencies finden
-    while IFS=$'\t' read -r installer package deps_json; do
-      [[ -z "$package" || -z "$deps_json" || "$deps_json" == "null" ]] && continue
-      
-      # Nur fuer pipx-Pakete relevant
-      if [[ "$installer" == "pipx" ]]; then
-        # JSON-Array in Bash-Array umwandeln
-        mapfile -t deps < <(echo "$deps_json" | jq -r '.[]')
-        if [[ ${#deps[@]} -gt 0 ]]; then
-          inject_pipx_dependencies "$package" "${deps[@]}"
-        fi
-      fi
-    done < <(jq -r --arg sec "$section" --argjson all "$INSTALL_ALL" '
-      (.[$sec]? // {}) | to_entries[] |
-      select(.value.dependencies?) |
-      select($all == 1 or .value.required != false) |
-      [.value.installer // "apt", .value.package, (.value.dependencies | tojson)] | @tsv
-    ' "$cfg")
-  done
-done
+process_dependency_configs "${CONFIG_FILES[@]}"
 
 ###############################################################################
 # 4 - Java-Executables herunterladen
@@ -257,38 +321,7 @@ is_valid_jar() {
 
 declare -A SEEN_JAR
 DOWNLOAD_WARNINGS=0
-for cfg in "${CONFIG_FILES[@]}"; do
-  while IFS=$'\t' read -r url target; do
-    [[ -n "${SEEN_JAR[$target]:-}" ]] && continue
-    SEEN_JAR["$target"]=1
-    if is_valid_jar "$target"; then
-      echo "$target bereits vorhanden und gueltig"
-    else
-      if [[ -f "$target" ]]; then
-        echo "!!! $target existiert aber ist ungueltig (kaputt/leer) - lade neu ..."
-        sudo rm -f "$target"
-      else
-        echo "Lade $url -> $target ..."
-      fi
-      sudo curl -fL -o "$target" "$url" || {
-        echo "!!! Download fehlgeschlagen: $url"
-        echo "!!! WARNUNG: Deployment wird fortgesetzt. Datei bitte manuell bereitstellen: $target"
-        sudo rm -f "$target"
-        DOWNLOAD_WARNINGS=1
-        continue
-      }
-      if ! is_valid_jar "$target"; then
-        echo "!!! Heruntergeladene Datei ist keine gueltige JAR: $target"
-        echo "!!! WARNUNG: Deployment wird fortgesetzt. Datei bitte manuell bereitstellen: $target"
-        sudo rm -f "$target"
-        DOWNLOAD_WARNINGS=1
-        continue
-      fi
-      sudo chmod +x "$target"
-      echo "$target heruntergeladen und validiert ✓"
-    fi
-  done < <(jq -r --argjson all "$INSTALL_ALL" '.javaExecutables? // {} | to_entries[] | select(.value.url? and .value.path?) | select($all == 1 or .value.required != false) | [.value.url, .value.path] | @tsv' "$cfg")
-done
+process_java_configs "${CONFIG_FILES[@]}"
 
 ###############################################################################
 # 5 - executables.json in vendor/ Paketen verarbeiten
@@ -308,66 +341,9 @@ if [[ -d "$VENDOR_DIR" ]]; then
   if ((${#VENDOR_CONFIGS[@]}>0)); then
     echo "Gefundene Vendor-Konfig-Dateien:"
     printf '  * %s\n' "${VENDOR_CONFIGS[@]}"
-    
-    # Pakete aus Vendor-Configs installieren (gleiche Logik wie Sektion 3)
-    for cfg in "${VENDOR_CONFIGS[@]}"; do
-      echo "Verarbeite Vendor-Config: $cfg"
-      for section in $SECTIONS; do
-        count=$(jq -r --arg sec "$section" '(.[$sec]? // {}) | length' "$cfg")
-        if [[ "$count" -gt 0 ]]; then
-          echo "  Sektion: $section ($count Eintraege)"
-        fi
-        
-        while IFS=$'\t' read -r installer package path; do
-          [[ -z "$package" ]] && continue
-          for pkg in $package; do
-            if [[ -n "${SEEN_PKG[$pkg]:-}" ]]; then
-              continue
-            fi
-            SEEN_PKG["$pkg"]=1
-            install_package "$installer" "$pkg" "$path"
-          done
-        done < <(jq -r --arg sec "$section" --argjson all "$INSTALL_ALL" '
-          (.[$sec]? // {}) | to_entries[] |
-          select($all == 1 or .value.required != false) |
-          [.value.installer // "apt", .value.packageDeb // .value.package, .value.path] | @tsv
-        ' "$cfg")
-      done
-    done
-    
-    # Java-Executables aus Vendor-Configs (gleiche Logik wie Sektion 4)
-    for cfg in "${VENDOR_CONFIGS[@]}"; do
-      while IFS=$'\t' read -r url target; do
-        [[ -n "${SEEN_JAR[$target]:-}" ]] && continue
-        SEEN_JAR["$target"]=1
-        if is_valid_jar "$target"; then
-          echo "$target bereits vorhanden und gueltig"
-        else
-          if [[ -f "$target" ]]; then
-            echo "!!! $target existiert aber ist ungueltig (kaputt/leer) - lade neu ..."
-            sudo rm -f "$target"
-          else
-            echo "Lade $url -> $target ..."
-          fi
-          sudo curl -fL -o "$target" "$url" || {
-            echo "!!! Download fehlgeschlagen: $url"
-            echo "!!! WARNUNG: Deployment wird fortgesetzt. Datei bitte manuell bereitstellen: $target"
-            sudo rm -f "$target"
-            DOWNLOAD_WARNINGS=1
-            continue
-          }
-          if ! is_valid_jar "$target"; then
-            echo "!!! Heruntergeladene Datei ist keine gueltige JAR: $target"
-            echo "!!! WARNUNG: Deployment wird fortgesetzt. Datei bitte manuell bereitstellen: $target"
-            sudo rm -f "$target"
-            DOWNLOAD_WARNINGS=1
-            continue
-          fi
-          sudo chmod +x "$target"
-          echo "$target heruntergeladen und validiert ✓"
-        fi
-      done < <(jq -r --argjson all "$INSTALL_ALL" '.javaExecutables? // {} | to_entries[] | select(.value.url? and .value.path?) | select($all == 1 or .value.required != false) | [.value.url, .value.path] | @tsv' "$cfg")
-    done
+
+    process_package_configs "Verarbeite Vendor-Config" "${VENDOR_CONFIGS[@]}"
+    process_java_configs "${VENDOR_CONFIGS[@]}"
   else
     echo "Keine executables.json in $VENDOR_DIR gefunden."
   fi
