@@ -255,10 +255,52 @@ process_dependency_configs() {
   done
 }
 
+# Loest GitHub-Release-Seiten in direkte Asset-Download-URLs auf.
+# Unterstuetzt: .../releases, .../releases/latest, .../releases/tag/<tag>
+# Direkte Links (auch .../releases/download/...) werden unveraendert zurueckgegeben.
+# Asset-Auswahl per Glob-Pattern (assetPattern in der Config, Default: *.jar).
+# Optional: GITHUB_TOKEN gegen API-Rate-Limits.
+resolve_download_url() {
+  local url="$1"
+  local pattern="${2:-}"
+  [[ -z "$pattern" ]] && pattern="*.jar"
+
+  local api=""
+  if [[ "$url" =~ ^https://github\.com/([^/]+)/([^/]+)/releases(/latest)?/?$ ]]; then
+    api="https://api.github.com/repos/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}/releases/latest"
+  elif [[ "$url" =~ ^https://github\.com/([^/]+)/([^/]+)/releases/tag/([^/]+)/?$ ]]; then
+    api="https://api.github.com/repos/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}/releases/tags/${BASH_REMATCH[3]}"
+  else
+    echo "$url"
+    return 0
+  fi
+
+  local auth=()
+  [[ -n "${GITHUB_TOKEN:-}" ]] && auth=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+
+  local assets
+  assets=$(curl -fsSL --max-time 30 "${auth[@]}" -H "Accept: application/vnd.github+json" "$api" | $JQ -r '.assets[]?.browser_download_url') || return 1
+  [[ -z "$assets" ]] && return 1
+
+  local asset
+  while IFS= read -r asset; do
+    if [[ "$(basename "$asset")" == $pattern ]]; then
+      echo "$asset"
+      return 0
+    fi
+  done <<< "$assets"
+
+  return 1
+}
+
 process_java_configs() {
-  local cfg url target
+  local cfg cfg_root url target pattern resolved
   for cfg in "$@"; do
-    while IFS=$'\t' read -r url target; do
+    # Relative Zielpfade beziehen sich auf das Repo der Config (config/..),
+    # nicht auf das Aufruf-CWD - analog zur Pfadaufloesung der Toolkits.
+    cfg_root="$(cd "$(dirname "$cfg")/.." && pwd)"
+    while IFS=$'\t' read -r url target pattern; do
+      [[ "$target" != /* ]] && target="$cfg_root/$target"
       [[ -n "${SEEN_JAR[$target]:-}" ]] && continue
       SEEN_JAR["$target"]=1
       if is_valid_jar "$target"; then
@@ -270,8 +312,16 @@ process_java_configs() {
         else
           echo "Lade $url -> $target ..."
         fi
-        sudo curl -fL -o "$target" "$url" || {
-          echo "!!! Download fehlgeschlagen: $url"
+        resolved=$(resolve_download_url "$url" "$pattern") || {
+          echo "!!! GitHub-Release-Aufloesung fehlgeschlagen: $url (Asset-Pattern: ${pattern:-*.jar})"
+          echo "!!! WARNUNG: Deployment wird fortgesetzt. Datei bitte manuell bereitstellen: $target"
+          DOWNLOAD_WARNINGS=1
+          continue
+        }
+        [[ "$resolved" != "$url" ]] && echo "GitHub-Release aufgeloest: $resolved"
+        sudo mkdir -p "$(dirname "$target")"
+        sudo curl -fL -o "$target" "$resolved" || {
+          echo "!!! Download fehlgeschlagen: $resolved"
           echo "!!! WARNUNG: Deployment wird fortgesetzt. Datei bitte manuell bereitstellen: $target"
           sudo rm -f "$target"
           DOWNLOAD_WARNINGS=1
@@ -287,7 +337,7 @@ process_java_configs() {
         sudo chmod +x "$target"
         echo "$target heruntergeladen und validiert ✓"
       fi
-    done < <($JQ -r --argjson all "$INSTALL_ALL" '.javaExecutables? // {} | to_entries[] | select(.value.url? and .value.path?) | select($all == 1 or .value.required != false) | [.value.url, .value.path] | @tsv' "$cfg")
+    done < <($JQ -r --argjson all "$INSTALL_ALL" '.javaExecutables? // {} | to_entries[] | select(.value.url? and .value.path?) | select($all == 1 or .value.required != false) | [.value.url, .value.path, .value.assetPattern // ""] | @tsv' "$cfg")
   done
 }
 
@@ -312,9 +362,11 @@ is_valid_jar() {
   local size
   size=$(stat -c%s "$file" 2>/dev/null || echo 0)
   [[ "$size" -lt 10240 ]] && return 1           # kleiner als 10 KB = sicher kaputt
-  # ZIP/JAR beginnt mit Magic Bytes PK (0x504B)
+  # ZIP/JAR beginnt mit Magic Bytes PK (0x504B). od statt xxd/hexdump:
+  # ueberall vorhanden und byteweise (hexdump ohne Formatangabe liefert
+  # little-endian-vertauschte Reihenfolge).
   local magic
-  magic=$(xxd -l 2 -p "$file" 2>/dev/null || hexdump -n 2 -e '"%02x"' "$file" 2>/dev/null || echo "")
+  magic=$(od -An -tx1 -N2 "$file" 2>/dev/null | tr -d ' \n')
   [[ "$magic" == "504b" ]] && return 0
   return 1
 }
