@@ -2,6 +2,16 @@
 # install-dependencies.sh
 # Liest alle *executables.json in config/, installiert Pakete & JARs
 # und startet rekursiv weitere install-dependencies-Skripte in vendor/.
+#
+# Verwendung:
+#   ./install-dependencies.sh                                  # eigener vendor-Baum
+#   ./install-dependencies.sh --all                            # inkl. optionaler Pakete
+#   ./install-dependencies.sh --vendor-root /pfad/zum/deployment   # zusaetzlicher Baum
+#
+# Hinweis: Ohne --vendor-root wird nur das vendor/ oberhalb des Skript-Ortes
+# gescannt. Deployments mit eigenem vendor/ (webservice, worker) muessen entweder
+# selbst aufrufen oder hier mit angegeben werden - sonst zeigen sie auf JAR-Versionen,
+# die nie heruntergeladen wurden.
 
 set -euo pipefail
 
@@ -14,11 +24,24 @@ fi
 export INSTALL_DEPS_RUNNING=1
 
 # --all: Auch optionale Pakete (required=false) installieren
+# --vendor-root <pfad>: Zusaetzlicher vendor-Baum, der mitgescannt wird. Ohne diese
+#   Angabe sieht das Skript nur das vendor/ oberhalb seines eigenen Ortes - ein
+#   Deployment mit eigenem vendor/ (webservice, worker) bliebe sonst unversorgt und
+#   liefe auf eine andere Toolkit-Version als der Baum, in dem das Skript liegt.
+#   Mehrfach angebbar, akzeptiert Repo-Wurzel oder vendor/ direkt.
 INSTALL_ALL=0
-for arg in "$@"; do
-  case "$arg" in
+EXTRA_VENDOR_ROOTS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --all) INSTALL_ALL=1 ;;
+    --vendor-root)
+      shift
+      [[ $# -gt 0 ]] || { echo "--vendor-root benoetigt einen Pfad"; exit 1; }
+      EXTRA_VENDOR_ROOTS+=("$1")
+      ;;
+    --vendor-root=*) EXTRA_VENDOR_ROOTS+=("${1#*=}") ;;
   esac
+  shift
 done
 
 if [[ "$INSTALL_ALL" -eq 1 ]]; then
@@ -388,11 +411,31 @@ while [[ "$ROOT" != "/" && ! -d "$ROOT/vendor" ]]; do
   ROOT="$(dirname "$ROOT")"
 done
 
-VENDOR_DIR="$ROOT/vendor"
-if [[ -d "$VENDOR_DIR" ]]; then
+# 5.2  Zu scannende vendor-Baeume sammeln: der eigene plus alle per --vendor-root
+#      uebergebenen. Doppelte Angaben werden ueber den realen Pfad entfernt.
+VENDOR_DIRS=()
+declare -A SEEN_VENDOR_DIR
+
+add_vendor_dir() {
+  local candidate="$1" real
+  # Sowohl Repo-Wurzel als auch vendor/ direkt akzeptieren
+  [[ -d "$candidate/vendor" ]] && candidate="$candidate/vendor"
+  [[ -d "$candidate" ]] || { echo "Hinweis: vendor-Baum nicht gefunden, wird uebersprungen: $1"; return 0; }
+  real="$(cd "$candidate" && pwd)"
+  [[ -n "${SEEN_VENDOR_DIR[$real]:-}" ]] && return 0
+  SEEN_VENDOR_DIR["$real"]=1
+  VENDOR_DIRS+=("$real")
+}
+
+add_vendor_dir "$ROOT/vendor"
+for extra in ${EXTRA_VENDOR_ROOTS[@]+"${EXTRA_VENDOR_ROOTS[@]}"}; do
+  add_vendor_dir "$extra"
+done
+
+for VENDOR_DIR in ${VENDOR_DIRS[@]+"${VENDOR_DIRS[@]}"}; do
   echo "Suche in $VENDOR_DIR nach weiteren executables.json Konfigurationen ..."
   mapfile -t VENDOR_CONFIGS < <(find "$VENDOR_DIR" -maxdepth 5 -path '*/config/*executables.json' -type f | sort)
-  
+
   if ((${#VENDOR_CONFIGS[@]}>0)); then
     echo "Gefundene Vendor-Konfig-Dateien:"
     printf '  * %s\n' "${VENDOR_CONFIGS[@]}"
@@ -402,7 +445,7 @@ if [[ -d "$VENDOR_DIR" ]]; then
   else
     echo "Keine executables.json in $VENDOR_DIR gefunden."
   fi
-fi
+done
 
 if [[ "$DOWNLOAD_WARNINGS" -eq 1 ]]; then
   echo "Alle definierten Abhaengigkeiten wurden geprueft."
