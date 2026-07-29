@@ -337,7 +337,10 @@ process_java_configs() {
         sudo chmod +x "$target"
         echo "$target heruntergeladen und validiert ✓"
       fi
-    done < <($JQ -r --argjson all "$INSTALL_ALL" '.javaExecutables? // {} | to_entries[] | select(.value.url? and .value.path?) | select($all == 1 or .value.required != false) | [.value.url, .value.path, .value.assetPattern // ""] | @tsv' "$cfg")
+    # Kein required-Filter: JARs mit hinterlegter url sind selbstinstallierend, und ein
+    # optionales Werkzeug soll trotzdem bereitstehen. "required" beschreibt zur Laufzeit
+    # die Wichtigkeit des Werkzeugs, nicht ob es installiert werden soll.
+    done < <($JQ -r '.javaExecutables? // {} | to_entries[] | select(.value.url? and .value.path?) | [.value.url, .value.path, .value.assetPattern // ""] | @tsv' "$cfg")
   done
 }
 
