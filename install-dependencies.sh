@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # install-dependencies.sh
 # Liest alle *executables.json in config/, installiert Pakete, JARs und
-# Installer-Werkzeuge (Tarball, IzPack)
+# Werkzeuge mit install-Angabe (Tarball, IzPack)
 # und startet rekursiv weitere install-dependencies-Skripte in vendor/.
 #
 # Verwendung:
@@ -405,8 +405,9 @@ process_java_configs "${CONFIG_FILES[@]}"
 ###############################################################################
 # 4b - Installer: Werkzeuge, die weder apt noch eine einzelne JAR liefern
 ###############################################################################
-# Sektion "installers" in executables.json. Jeder Eintrag beschreibt EINE
-# Quelle und wie sie auf die Platte kommt:
+# Feld "install" an einem Eintrag der shellExecutables (ein eigener Abschnitt
+# ist nicht moeglich: der Config-Loader verlangt an jedem Eintrag jeder Sektion
+# ein "path"). Das Objekt beschreibt EINE Quelle und wie sie auf die Platte kommt:
 #
 #   "type"           tarball | izpack
 #   "url"            direkte Download-URL (GitHub-Release-Seiten wie bei den
@@ -573,7 +574,7 @@ process_installer_configs() {
       links=$(echo "$entry" | $JQ -c '.value.links // {}')
 
       if [[ -z "$type" || -z "$url" ]]; then
-        echo "  [WARN] Installer $name ohne type oder url - uebersprungen"
+        echo "  [WARN] install an $name ohne type oder url - uebersprungen"
         continue
       fi
       if [[ -n "$arch" && "$arch" != "$machine" ]]; then
@@ -598,7 +599,7 @@ process_installer_configs() {
         echo "!!! WARNUNG: $name installiert, aber '$version_command' meldet nicht Version $version"
         DOWNLOAD_WARNINGS=1
       fi
-    done < <($JQ -c '.installers? // {} | to_entries[]' "$cfg")
+    done < <($JQ -c '.shellExecutables? // {} | to_entries[] | select(.value.install? and (.value.install | type == "object")) | {key: .key, value: .value.install}' "$cfg")
   done
 }
 
