@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # install-dependencies.sh
-# Liest alle *executables.json in config/, installiert Pakete & JARs
+# Liest alle *executables.json in config/, installiert Pakete, JARs und
+# Installer-Werkzeuge (Tarball, IzPack)
 # und startet rekursiv weitere install-dependencies-Skripte in vendor/.
 #
 # Verwendung:
@@ -402,6 +403,208 @@ DOWNLOAD_WARNINGS=0
 process_java_configs "${CONFIG_FILES[@]}"
 
 ###############################################################################
+# 4b - Installer: Werkzeuge, die weder apt noch eine einzelne JAR liefern
+###############################################################################
+# Sektion "installers" in executables.json. Jeder Eintrag beschreibt EINE
+# Quelle und wie sie auf die Platte kommt:
+#
+#   "type"           tarball | izpack
+#   "url"            direkte Download-URL (GitHub-Release-Seiten wie bei den
+#                    JARs: .../releases/tag/<tag> plus "assetPattern")
+#   "sha256"         Pruefsumme des Downloads; bei Abweichung wird nichts installiert
+#   "arch"           optional, z. B. "x86_64": andere Architekturen ueberspringen
+#   "version"        erwartete Version; zusammen mit "versionCommand" die
+#                    Fertig-Pruefung (Ausgabe enthaelt die Version -> nichts tun)
+#   "versionCommand" Befehl, der die installierte Version ausgibt
+#   tarball:  "member" Pfad der Datei im Archiv, "target" Zielpfad (0755)
+#   izpack:   "installPath" Zielordner des IzPack-Installers (Java noetig),
+#             "links" { "/usr/local/bin/x": "/opt/x/x" } Symlinks danach
+#
+# Wie bei den JARs gibt es keinen required-Filter: Was hier steht, ist
+# selbstinstallierend; ein optionales Werkzeug soll trotzdem bereitstehen.
+# Fehler brechen das Deployment nicht ab, sondern setzen DOWNLOAD_WARNINGS.
+
+# Fuehrt einen Befehl mit sudo aus, wenn der naechste existierende Elternordner
+# des Ziels nicht beschreibbar ist. So laufen Tests und Nutzer-Prefixe ohne root.
+run_for_target() {
+  local target="$1"
+  shift
+  local probe="$target"
+  while [[ ! -e "$probe" && "$probe" != "/" ]]; do
+    probe="$(dirname "$probe")"
+  done
+  if [[ -w "$probe" ]]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+verify_sha256() {
+  local file="$1" expected="$2" actual
+  [[ -z "$expected" ]] && { echo "  Hinweis: keine sha256 hinterlegt, Download ungeprueft"; return 0; }
+  actual=$(sha256sum "$file" | awk '{print $1}')
+  if [[ "$actual" != "$expected" ]]; then
+    echo "!!! Pruefsumme stimmt nicht: erwartet $expected, erhalten $actual"
+    return 1
+  fi
+  return 0
+}
+
+# Fertig, wenn versionCommand laeuft und seine Ausgabe die erwartete Version enthaelt.
+installer_up_to_date() {
+  local version_command="$1" version="$2" out
+  [[ -z "$version_command" || -z "$version" ]] && return 1
+  out=$(eval "$version_command" 2>&1) || return 1
+  [[ "$out" == *"$version"* ]]
+}
+
+ensure_tool() {
+  local tool="$1" package="$2"
+  command -v "$tool" &>/dev/null && return 0
+  echo "  $tool fehlt - installiere $package ..."
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$package"
+}
+
+download_installer_source() {
+  local url="$1" pattern="$2" out="$3" resolved
+  resolved=$(resolve_download_url "$url" "$pattern") || {
+    echo "!!! Download-Adresse nicht aufloesbar: $url (Asset-Pattern: ${pattern:-*})"
+    return 1
+  }
+  [[ "$resolved" != "$url" ]] && echo "  GitHub-Release aufgeloest: $resolved"
+  curl -fsSL --retry 3 -o "$out" "$resolved" || {
+    echo "!!! Download fehlgeschlagen: $resolved"
+    return 1
+  }
+}
+
+install_from_tarball() {
+  local name="$1" url="$2" pattern="$3" sha="$4" member="$5" target="$6" tmp
+  [[ -z "$member" || -z "$target" ]] && { echo "!!! $name: tarball braucht member und target"; return 1; }
+  tmp=$(mktemp -d)
+  download_installer_source "$url" "$pattern" "$tmp/archive" || { rm -rf "$tmp"; return 1; }
+  verify_sha256 "$tmp/archive" "$sha" || { rm -rf "$tmp"; return 1; }
+  mkdir -p "$tmp/x"
+  tar -xzf "$tmp/archive" -C "$tmp/x" || { echo "!!! $name: Archiv nicht entpackbar"; rm -rf "$tmp"; return 1; }
+  if [[ ! -f "$tmp/x/$member" ]]; then
+    echo "!!! $name: $member fehlt im Archiv"
+    rm -rf "$tmp"
+    return 1
+  fi
+  run_for_target "$target" mkdir -p "$(dirname "$target")"
+  run_for_target "$target" install -m 0755 "$tmp/x/$member" "$target"
+  rm -rf "$tmp"
+  echo "  $target installiert"
+}
+
+install_from_izpack() {
+  local name="$1" url="$2" pattern="$3" sha="$4" install_path="$5" links_json="$6" tmp jar
+  [[ -z "$install_path" ]] && { echo "!!! $name: izpack braucht installPath"; return 1; }
+  ensure_tool unzip unzip
+  ensure_tool java default-jre-headless
+  tmp=$(mktemp -d)
+  download_installer_source "$url" "$pattern" "$tmp/archive" || { rm -rf "$tmp"; return 1; }
+  verify_sha256 "$tmp/archive" "$sha" || { rm -rf "$tmp"; return 1; }
+  mkdir -p "$tmp/x"
+  unzip -q "$tmp/archive" -d "$tmp/x" || { echo "!!! $name: ZIP nicht entpackbar"; rm -rf "$tmp"; return 1; }
+  jar=$(find "$tmp/x" -type f -iname '*installer*.jar' | head -1)
+  [[ -z "$jar" ]] && jar=$(find "$tmp/x" -type f -name '*.jar' | head -1)
+  if [[ -z "$jar" ]]; then
+    echo "!!! $name: kein Installer-JAR im Archiv"
+    rm -rf "$tmp"
+    return 1
+  fi
+  # Unbeaufsichtigte IzPack-Installation: Zielordner vorgeben, Standardpakete.
+  cat > "$tmp/auto-install.xml" <<XML
+<AutomatedInstallation langpack="eng">
+    <com.izforge.izpack.panels.htmlhello.HTMLHelloPanel id="welcome"/>
+    <com.izforge.izpack.panels.target.TargetPanel id="install_dir">
+        <installpath>$install_path</installpath>
+    </com.izforge.izpack.panels.target.TargetPanel>
+    <com.izforge.izpack.panels.packs.PacksPanel id="sdk_pack_select"/>
+    <com.izforge.izpack.panels.install.InstallPanel id="install"/>
+    <com.izforge.izpack.panels.finish.FinishPanel id="finish"/>
+</AutomatedInstallation>
+XML
+  run_for_target "$install_path" mkdir -p "$(dirname "$install_path")"
+  if ! run_for_target "$install_path" java -jar "$jar" "$tmp/auto-install.xml" > "$tmp/install.log" 2>&1; then
+    echo "!!! $name: IzPack-Installation fehlgeschlagen"
+    tail -n 5 "$tmp/install.log"
+    rm -rf "$tmp"
+    return 1
+  fi
+  rm -rf "$tmp"
+  local link_target link_name
+  while IFS=$'\t' read -r link_name link_target; do
+    [[ -z "$link_name" ]] && continue
+    if [[ ! -e "$link_target" ]]; then
+      echo "!!! $name: Linkziel fehlt nach der Installation: $link_target"
+      return 1
+    fi
+    run_for_target "$link_name" mkdir -p "$(dirname "$link_name")"
+    run_for_target "$link_name" ln -sfn "$link_target" "$link_name"
+    echo "  $link_name -> $link_target"
+  done < <(echo "$links_json" | $JQ -r 'to_entries[]? | [.key, .value] | @tsv')
+  echo "  $install_path installiert"
+}
+
+declare -A SEEN_INSTALLER
+
+process_installer_configs() {
+  local cfg entry name type url pattern sha arch version version_command member target install_path links machine
+  machine=$(uname -m)
+  for cfg in "$@"; do
+    while IFS= read -r entry; do
+      [[ -z "$entry" ]] && continue
+      name=$(echo "$entry" | $JQ -r '.key')
+      [[ -n "${SEEN_INSTALLER[$name]:-}" ]] && continue
+      SEEN_INSTALLER["$name"]=1
+      type=$(echo "$entry" | $JQ -r '.value.type // ""')
+      url=$(echo "$entry" | $JQ -r '.value.url // ""')
+      pattern=$(echo "$entry" | $JQ -r '.value.assetPattern // ""')
+      sha=$(echo "$entry" | $JQ -r '.value.sha256 // ""')
+      arch=$(echo "$entry" | $JQ -r '.value.arch // ""')
+      version=$(echo "$entry" | $JQ -r '.value.version // ""')
+      version_command=$(echo "$entry" | $JQ -r '.value.versionCommand // ""')
+      member=$(echo "$entry" | $JQ -r '.value.member // ""')
+      target=$(echo "$entry" | $JQ -r '.value.target // ""')
+      install_path=$(echo "$entry" | $JQ -r '.value.installPath // ""')
+      links=$(echo "$entry" | $JQ -c '.value.links // {}')
+
+      if [[ -z "$type" || -z "$url" ]]; then
+        echo "  [WARN] Installer $name ohne type oder url - uebersprungen"
+        continue
+      fi
+      if [[ -n "$arch" && "$arch" != "$machine" ]]; then
+        echo "  Installer $name: nur fuer $arch, hier $machine - uebersprungen"
+        continue
+      fi
+      if installer_up_to_date "$version_command" "$version"; then
+        echo "  [OK] $name $version bereits installiert"
+        continue
+      fi
+      echo "  [installer] $name ($type) ..."
+      case "$type" in
+        tarball) install_from_tarball "$name" "$url" "$pattern" "$sha" "$member" "$target" ;;
+        izpack)  install_from_izpack "$name" "$url" "$pattern" "$sha" "$install_path" "$links" ;;
+        *)       echo "  [WARN] Unbekannter Installer-Typ '$type' fuer $name"; false ;;
+      esac || {
+        echo "!!! WARNUNG: Deployment wird fortgesetzt. $name bitte manuell bereitstellen."
+        DOWNLOAD_WARNINGS=1
+        continue
+      }
+      if [[ -n "$version_command" ]] && ! installer_up_to_date "$version_command" "$version"; then
+        echo "!!! WARNUNG: $name installiert, aber '$version_command' meldet nicht Version $version"
+        DOWNLOAD_WARNINGS=1
+      fi
+    done < <($JQ -c '.installers? // {} | to_entries[]' "$cfg")
+  done
+}
+
+process_installer_configs "${CONFIG_FILES[@]}"
+
+###############################################################################
 # 5 - executables.json in vendor/ Paketen verarbeiten
 ###############################################################################
 # 5.1  Projekt-Root ermitteln - steige solange nach oben, bis ein vendor/-Ordner
@@ -442,6 +645,7 @@ for VENDOR_DIR in ${VENDOR_DIRS[@]+"${VENDOR_DIRS[@]}"}; do
 
     process_package_configs "Verarbeite Vendor-Config" "${VENDOR_CONFIGS[@]}"
     process_java_configs "${VENDOR_CONFIGS[@]}"
+    process_installer_configs "${VENDOR_CONFIGS[@]}"
   else
     echo "Keine executables.json in $VENDOR_DIR gefunden."
   fi
@@ -449,7 +653,7 @@ done
 
 if [[ "$DOWNLOAD_WARNINGS" -eq 1 ]]; then
   echo "Alle definierten Abhaengigkeiten wurden geprueft."
-  echo "WARNUNG: Mindestens ein Java-Download ist fehlgeschlagen. Bitte betroffene Datei(en) manuell bereitstellen."
+  echo "WARNUNG: Mindestens ein Download oder Installer ist fehlgeschlagen. Bitte betroffene Werkzeuge manuell bereitstellen."
 else
   echo "Alle definierten Abhaengigkeiten wurden geprueft und installiert."
 fi
