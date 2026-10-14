@@ -236,8 +236,10 @@ process_package_configs() {
         echo "  Sektion: $section ($count Eintraege)"
       fi
 
-      # Process substitution statt Pipe um SEEN_PKG zu erhalten
-      while IFS=$'\t' read -r installer package path; do
+      # Process substitution statt Pipe um SEEN_PKG zu erhalten. Trenner 0x1f statt
+      # Tab: Tab gilt in bash als Leerraum, ein leeres Feld (Eintrag ohne package)
+      # fiele weg und der Pfad landete im Paketfeld.
+      while IFS=$'\x1f' read -r installer package path; do
         [[ -z "$package" ]] && continue
         # Mehrere Pakete (Space-getrennt) unterstuetzen
         for pkg in $package; do
@@ -250,7 +252,7 @@ process_package_configs() {
       done < <($JQ -r --arg sec "$section" --argjson all "$INSTALL_ALL" '
         (.[$sec]? // {}) | to_entries[] |
         select($all == 1 or .value.required != false) |
-        [.value.installer // "apt", .value.packageDeb // .value.package, .value.path] | @tsv
+        [.value.installer // "apt", .value.packageDeb // .value.package // "", .value.path // ""] | join("\u001f")
       ' "$cfg")
     done
   done
@@ -261,7 +263,7 @@ process_dependency_configs() {
   for cfg in "$@"; do
     for section in $SECTIONS; do
       # Pakete mit dependencies finden
-      while IFS=$'\t' read -r installer package deps_json; do
+      while IFS=$'\x1f' read -r installer package deps_json; do
         [[ -z "$package" || -z "$deps_json" || "$deps_json" == "null" ]] && continue
 
         # Nur fuer pipx-Pakete relevant
@@ -276,7 +278,7 @@ process_dependency_configs() {
         (.[$sec]? // {}) | to_entries[] |
         select(.value.dependencies?) |
         select($all == 1 or .value.required != false) |
-        [.value.installer // "apt", .value.package, (.value.dependencies | tojson)] | @tsv
+        [.value.installer // "apt", .value.package // "", (.value.dependencies | tojson)] | join("\u001f")
       ' "$cfg")
     done
   done
@@ -558,7 +560,7 @@ XML
   fi
   rm -rf "$tmp"
   local link_target link_name
-  while IFS=$'\t' read -r link_name link_target; do
+  while IFS=$'\x1f' read -r link_name link_target; do
     [[ -z "$link_name" ]] && continue
     if [[ ! -e "$link_target" ]]; then
       echo "!!! $name: Linkziel fehlt nach der Installation: $link_target"
@@ -567,7 +569,7 @@ XML
     run_for_target "$link_name" mkdir -p "$(dirname "$link_name")"
     run_for_target "$link_name" ln -sfn "$link_target" "$link_name"
     echo "  $link_name -> $link_target"
-  done < <(echo "$links_json" | $JQ -r 'to_entries[]? | [.key, .value] | @tsv')
+  done < <(echo "$links_json" | $JQ -r 'to_entries[]? | [.key, (.value | tostring)] | join("\u001f")')
   echo "  $install_path installiert"
 }
 
