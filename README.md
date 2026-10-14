@@ -1,13 +1,13 @@
 # install-dependencies
 
-Kleines Bash‑Skript, das die Datei `config/executables.json` einliest und automatisch fehlende Linux‑Pakete (APT) sowie Java‑Executables installiert bzw. herunterlädt.
+Bash-Skript, das alle `*executables.json` unter `config/` und in den vendor-Paketen einliest und fehlende Linux-Pakete (APT), Java-Executables (JAR) und Werkzeuge mit `install`-Angabe installiert bzw. herunterlädt. Es wird als Submodul `installscript/` eingebunden (ckonverter-core, php-pdf-toolkit, php-common-toolkit, php-erechnung-toolkit) und startet keine weiteren Skripte.
 
 ## Funktionsweise
 
-* **Pfad‑Auflösung** – Das Skript liegt in `scripts/install.sh` und sucht per relativer Navigation nach `../config/executables.json`.
+* **Pfad-Auflösung** – Das Skript liegt in `installscript/install-dependencies.sh` und liest `../config/*executables.json` des einbindenden Repos sowie die `*executables.json` der Pakete unter `vendor/` (mit `--vendor-root <pfad>` zusätzlich die eines anderen Deployments).
 * **Requirement Check** – stellt sicher, dass [`jq`](https://stedolan.github.io/jq/) installiert ist.
 * **shellExecutables** – für jeden Eintrag mit Schlüssel `package` wird geprüft, ob das Debian‑/Ubuntu‑Paket bereits vorhanden ist; fehlende Pakete werden via `sudo apt-get install -y <package>` nachinstalliert.
-* **javaExecutables** – enthält Paare aus `url` und `path`. Existiert die Zieldatei nicht, lädt das Skript die Datei per `curl -L -o <path> <url>` herunter, prüft die ZIP/JAR-Magic-Bytes und setzt die Ausführungsrechte (`chmod +x`). Relative `path`-Angaben werden relativ zum Repo der jeweiligen Config aufgelöst (`config/..`), nicht zum Aufruf-Verzeichnis.
+* **javaExecutables** – enthält Paare aus `url` und `path`. Existiert die Zieldatei nicht, lädt das Skript die Datei per `curl -L -o <path> <url>` herunter, prüft die ZIP/JAR-Magic-Bytes und, wenn das optionale Feld `sha256` gesetzt ist, die Prüfsumme: Bei Abweichung wird der Download verworfen (Warnung), eine schon vorhandene Datei mit anderer Prüfsumme wird neu geladen. Mit `sha256` gehört in `url` eine feste Download-Adresse, keine Release-Seite, die auf die jeweils neueste Version zeigt. Danach setzt das Skript die Ausführungsrechte (`chmod +x`). Relative `path`-Angaben werden relativ zum Repo der jeweiligen Config aufgelöst (`config/..`), nicht zum Aufruf-Verzeichnis.
 * **install** (Feld an einem `shellExecutables`-Eintrag) – für Werkzeuge, die weder apt noch eine einzelne JAR liefern. Ein eigener Abschnitt geht nicht, weil der Config-Loader an jedem Eintrag ein `path` verlangt. Das Objekt hat `type` (`tarball` oder `izpack`), `url`, optional `sha256` (Download wird bei Abweichung verworfen), `arch` (z. B. `x86_64`, andere Rechner überspringen den Eintrag) sowie `version` und `versionCommand` (liefert der Befehl die Version, ist nichts zu tun). `tarball` kopiert `member` aus dem Archiv nach `target` (0755). `izpack` entpackt das ZIP, startet das IzPack-Installer-JAR unbeaufsichtigt nach `installPath` (Java wird bei Bedarf als `default-jre-headless` installiert) und legt die Symlinks aus `links` an. Wie bei den JARs gibt es keinen `required`-Filter; Fehler setzen nur eine Warnung.
 * **GitHub-Releases** – zeigt `url` auf eine GitHub-Release-Seite (`…/releases`, `…/releases/latest` oder `…/releases/tag/<tag>`), wird das passende Asset automatisch über die GitHub-API aufgelöst. Die Asset-Auswahl steuert das optionale Feld `assetPattern` (Glob auf den Asset-Dateinamen, Default `*.jar`). Direkte Download-URLs (auch `…/releases/download/…`) werden unverändert genutzt. Gegen API-Rate-Limits kann die Umgebungsvariable `GITHUB_TOKEN` gesetzt werden.
 
@@ -41,8 +41,8 @@ chmod +x install-dependencies.sh
       "path": "/usr/local/bin/plantuml.jar"
     },
     "kosit-validator": {
-      "url": "https://github.com/itplr-kosit/validator/releases",
-      "assetPattern": "*-standalone.jar",
+      "url": "https://github.com/itplr-kosit/validator/releases/download/v1.6.3/validator-1.6.3-standalone.jar",
+      "sha256": "799e64befca97d4080e03608c80b85dd5a5ecc5f4ae4f35d1116ec2855b9a7c9",
       "path": "tools/kosit/validator.jar"
     }
   },

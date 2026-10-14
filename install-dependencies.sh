@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # install-dependencies.sh
-# Liest alle *executables.json in config/, installiert Pakete, JARs und
-# Werkzeuge mit install-Angabe (Tarball, IzPack)
-# und startet rekursiv weitere install-dependencies-Skripte in vendor/.
+# Liest alle *executables.json in config/ und in den vendor-Paketen, installiert
+# Pakete, JARs (mit sha256, wenn hinterlegt) und Werkzeuge mit install-Angabe
+# (Tarball, IzPack). Weitere Skripte startet es nicht; die vendor-Pakete werden
+# nur ueber ihre *executables.json gelesen (Abschnitt 5).
 #
 # Verwendung:
 #   ./install-dependencies.sh                                  # eigener vendor-Baum
@@ -17,8 +18,10 @@
 set -euo pipefail
 
 ###############################################################################
-# 0 - Rekursions-Schutz & Parameter
+# 0 - Schutz gegen verschachtelten Aufruf & Parameter
 ###############################################################################
+# Startet ein Installer (IzPack, Paket-Hook) aus diesem Lauf heraus erneut ein
+# install-dependencies.sh, endet der innere Aufruf sofort.
 if [[ -n "${INSTALL_DEPS_RUNNING:-}" ]]; then
   exit 0
 fi
@@ -78,7 +81,7 @@ printf '  * %s\n' "${CONFIG_FILES[@]}"
 ###############################################################################
 declare -A SEEN_PKG
 
-# Noninteractive mode um Dialoge (z.B. Dienst-Neustarts) zu unterdrücken
+# Noninteractive mode um Dialoge (z.B. Dienst-Neustarts) zu unterdruecken
 export DEBIAN_FRONTEND=noninteractive
 
 # apt update kann wegen einzelner Fremd-Repositories fehlschlagen.
@@ -317,21 +320,42 @@ resolve_download_url() {
   return 1
 }
 
+# Prueft eine Datei gegen die hinterlegte sha256; ohne Angabe nur ein Hinweis.
+verify_sha256() {
+  local file="$1" expected="$2" actual
+  [[ -z "$expected" ]] && { echo "  Hinweis: keine sha256 hinterlegt, Download ungeprueft"; return 0; }
+  actual=$(sha256sum "$file" | awk '{print $1}')
+  if [[ "$actual" != "$expected" ]]; then
+    echo "!!! Pruefsumme stimmt nicht: erwartet $expected, erhalten $actual"
+    return 1
+  fi
+  return 0
+}
+
+# Liegt die Datei schon vor und stimmt ihre Pruefsumme (ohne Angabe: immer)?
+jar_matches_sha256() {
+  local file="$1" expected="$2"
+  [[ -z "$expected" ]] && return 0
+  [[ "$(sha256sum "$file" 2>/dev/null | awk '{print $1}')" == "$expected" ]]
+}
+
 process_java_configs() {
-  local cfg cfg_root url target pattern resolved
+  local cfg cfg_root url target pattern sha resolved
   for cfg in "$@"; do
     # Relative Zielpfade beziehen sich auf das Repo der Config (config/..),
     # nicht auf das Aufruf-CWD - analog zur Pfadaufloesung der Toolkits.
     cfg_root="$(cd "$(dirname "$cfg")/.." && pwd)"
-    while IFS=$'\t' read -r url target pattern; do
+    # Trenner 0x1f statt Tab: Tab gilt in bash als Leerraum, leere Felder
+    # (assetPattern) fielen weg und die Pruefsumme rutschte ins falsche Feld.
+    while IFS=$'\x1f' read -r url target pattern sha; do
       [[ "$target" != /* ]] && target="$cfg_root/$target"
       [[ -n "${SEEN_JAR[$target]:-}" ]] && continue
       SEEN_JAR["$target"]=1
-      if is_valid_jar "$target"; then
+      if is_valid_jar "$target" && jar_matches_sha256 "$target" "$sha"; then
         echo "$target bereits vorhanden und gueltig"
       else
         if [[ -f "$target" ]]; then
-          echo "!!! $target existiert aber ist ungueltig (kaputt/leer) - lade neu ..."
+          echo "!!! $target existiert, ist aber ungueltig oder hat eine andere Pruefsumme - lade neu ..."
           sudo rm -f "$target"
         else
           echo "Lade $url -> $target ..."
@@ -358,13 +382,21 @@ process_java_configs() {
           DOWNLOAD_WARNINGS=1
           continue
         fi
+        # Ein manipuliertes JAR mit gueltigem ZIP-Kopf liefe sonst als java -jar
+        # ueber Kundendateien (Scan 13.10.2026, S4-04).
+        if ! verify_sha256 "$target" "$sha"; then
+          echo "!!! WARNUNG: Deployment wird fortgesetzt. Datei bitte manuell bereitstellen: $target"
+          sudo rm -f "$target"
+          DOWNLOAD_WARNINGS=1
+          continue
+        fi
         sudo chmod +x "$target"
-        echo "$target heruntergeladen und validiert ✓"
+        echo "$target heruntergeladen und validiert (ok)"
       fi
     # Kein required-Filter: JARs mit hinterlegter url sind selbstinstallierend, und ein
     # optionales Werkzeug soll trotzdem bereitstehen. "required" beschreibt zur Laufzeit
     # die Wichtigkeit des Werkzeugs, nicht ob es installiert werden soll.
-    done < <($JQ -r '.javaExecutables? // {} | to_entries[] | select(.value.url? and .value.path?) | [.value.url, .value.path, .value.assetPattern // ""] | @tsv' "$cfg")
+    done < <($JQ -r '.javaExecutables? // {} | to_entries[] | select(.value.url? and .value.path?) | [.value.url, .value.path, .value.assetPattern // "", .value.sha256 // ""] | join("\u001f")' "$cfg")
   done
 }
 
@@ -439,17 +471,6 @@ run_for_target() {
   else
     sudo "$@"
   fi
-}
-
-verify_sha256() {
-  local file="$1" expected="$2" actual
-  [[ -z "$expected" ]] && { echo "  Hinweis: keine sha256 hinterlegt, Download ungeprueft"; return 0; }
-  actual=$(sha256sum "$file" | awk '{print $1}')
-  if [[ "$actual" != "$expected" ]]; then
-    echo "!!! Pruefsumme stimmt nicht: erwartet $expected, erhalten $actual"
-    return 1
-  fi
-  return 0
 }
 
 # Fertig, wenn versionCommand laeuft und seine Ausgabe die erwartete Version enthaelt.
