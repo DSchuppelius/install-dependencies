@@ -138,6 +138,45 @@ ensure_installer() {
   esac
 }
 
+# pipx-Werkzeuge liegen systemweit: venvs unter /opt/pipx, Aufrufe in /usr/local/bin
+PIPX_SYSTEM_HOME="${PIPX_SYSTEM_HOME:-/opt/pipx}"
+PIPX_SYSTEM_BIN="${PIPX_SYSTEM_BIN:-/usr/local/bin}"
+
+# Hilfsfunktion: Ist ein pipx-Werkzeug wirklich lauffaehig?
+# Dass die Datei in /usr/local/bin existiert, reicht nicht. Nach einem
+# Python-Update startet die venv mit der neuen Version, die Pakete liegen aber
+# noch unter lib/python<alt>/ - der Aufruf endet in ModuleNotFoundError
+# (pdf2docx intern, 11.11.2026). Ebenso kann dort ein loses Skript einer
+# frueheren pip-Installation liegen. Lauffaehig heisst deshalb: Der Aufruf ist
+# ein Verweis in eine pipx-venv, und deren Python findet das Paket.
+pipx_package_usable() {
+  local package="$1" path="$2"
+  local bin="$PIPX_SYSTEM_BIN/$path" target venv
+  [[ -n "$path" && -x "$bin" ]] || return 1
+  target=$(readlink -f "$bin") || return 1
+  [[ "$target" == "$PIPX_SYSTEM_HOME"/venvs/*/bin/* ]] || return 1
+  venv="${target%/bin/*}"
+  "$venv/bin/python" -c 'import importlib.metadata, sys; importlib.metadata.distribution(sys.argv[1])' "$package" &>/dev/null
+}
+
+# Hilfsfunktion: pipx-Werkzeug installieren oder eine kaputte venv neu aufsetzen.
+# "pipx install --force" allein legt die venv nicht neu an, deshalb erst
+# reinstall (baut die venv mit dem aktuellen Python), sonst uninstall + install.
+pipx_install_or_repair() {
+  local package="$1"
+  local env=(PIPX_HOME="$PIPX_SYSTEM_HOME" PIPX_BIN_DIR="$PIPX_SYSTEM_BIN")
+  if [[ -d "$PIPX_SYSTEM_HOME/venvs/$package" ]]; then
+    echo "  [pipx] Setze neu auf: $package (venv nicht lauffaehig, z. B. nach Python-Update)"
+    if sudo "${env[@]}" pipx reinstall "$package"; then
+      return 0
+    fi
+    sudo "${env[@]}" pipx uninstall "$package" || true
+  fi
+  echo "  [pipx] Installiere: $package (global nach $PIPX_SYSTEM_BIN)"
+  # --force ersetzt auch ein loses Skript gleichen Namens in $PIPX_SYSTEM_BIN
+  sudo "${env[@]}" pipx install --force "$package"
+}
+
 # Hilfsfunktion: Paket mit Installer installieren
 install_package() {
   local installer="$1"
@@ -174,13 +213,10 @@ install_package() {
       ;;
     pipx)
       ensure_installer pipx
-      # Pruefen ob in /usr/local/bin oder via pipx list vorhanden
-      if [[ -x "/usr/local/bin/$path" ]] || PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx list 2>/dev/null | grep -q "$package"; then
+      if pipx_package_usable "$package" "$path"; then
         echo "  [OK] $package bereits installiert"
       else
-        echo "  [pipx] Installiere: $package (global nach /usr/local/bin)"
-        # PIPX_HOME und PIPX_BIN_DIR fuer systemweite Installation setzen
-        sudo PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin pipx install "$package"
+        pipx_install_or_repair "$package"
       fi
       ;;
     npm)
