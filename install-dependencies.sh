@@ -107,7 +107,51 @@ safe_apt_update() {
     echo "Betroffene Quelle(n): $broken_sources"
   fi
 
+  diagnose_releaseinfo_change "$apt_output"
+
   return 0
+}
+
+# Geaenderte Release-Info (Label, Origin, Suite, Codename, Version) eines
+# Repositorys: apt verweigert dann das Update, bis die Aenderung ausdruecklich
+# bestaetigt ist. Das Skript bestaetigt nie selbst - eine unerwartete Aenderung
+# kann auf ein uebernommenes Repository deuten. Es nennt aber den Befehl.
+# Erkennt die deutsche und die englische Meldung von apt (hier in ASCII
+# umschrieben; apt setzt im Deutschen Guillemets um die Werte):
+#   E: Fuer das Depot >>URL ...<< wurde der >>Label<<-Wert von >>ALT<< in >>NEU<< geaendert.
+#   E: Repository 'URL ...' changed its 'Label' value from 'ALT' to 'NEU'
+# Das Muster nennt die Anfuehrungszeichen nicht selbst (ein bis drei Zeichen,
+# die keine Buchstaben sind), damit das Skript reines ASCII bleibt.
+diagnose_releaseinfo_change() {
+  local apt_output="$1" lines fields option deprecated=0
+  lines=$(printf '%s\n' "$apt_output" | grep -E "[^A-Za-z]{1,3}[A-Za-z]+[^A-Za-z]{1,3}-Wert von|changed its '[A-Za-z]+' value" || true)
+  [[ -n "$lines" ]] || return 0
+
+  fields=$(printf '%s\n' "$lines" \
+    | sed -nE "s/.*[^A-Za-z]{1,3}([A-Za-z]+)[^A-Za-z]{1,3}-Wert von.*/\1/p; s/.*changed its '([A-Za-z]+)' value.*/\1/p" \
+    | tr '[:upper:]' '[:lower:]' | sort -u)
+  option=""
+  local field
+  for field in $fields; do
+    case "$field" in
+      label|origin|suite|codename|version) option+=" --allow-releaseinfo-change-$field" ;;
+      *) option+=" --allow-releaseinfo-change" ;;
+    esac
+  done
+  option=$(printf '%s\n' $option | sort -u | tr '\n' ' ')
+  if printf '%s\n' "$lines" | grep -qi "deprecated"; then
+    deprecated=1
+  fi
+
+  echo ""
+  echo "Hinweis: Bei mindestens einem Repository hat sich die Release-Info geaendert (siehe E:-Zeilen oben)."
+  echo "   apt verlangt dafuer eine ausdrueckliche Bestaetigung; dieses Skript bestaetigt nie selbst."
+  echo "   Pruefen, ob die Aenderung erwartet ist, dann einmal von Hand:"
+  echo "     sudo apt-get update ${option% }"
+  if [[ $deprecated -eq 1 ]]; then
+    echo "   Mindestens ein Repository ist jetzt als \"deprecated\" markiert: Es bekommt kuenftig womoeglich"
+    echo "   keine Updates mehr. Auf der Seite des Anbieters nach dem Nachfolger sehen und umstellen."
+  fi
 }
 
 safe_apt_update            # einmal zu Beginn
